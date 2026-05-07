@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field
 
 
 StatusName = Literal["Training", "In Japan (Bench)", "Assigned (Pre-Join)", "Joined", "Historical"]
@@ -21,13 +21,6 @@ class EngineerCreate(BaseModel):
     primary_skill: Optional[str] = None
     secondary_skills: List[str] = []
 
-    @model_validator(mode="after")
-    def validate_japan_date(self):
-        if self.current_status in {"In Japan (Bench)", "Assigned (Pre-Join)", "Joined"} and not self.japan_arrival_date:
-            raise ValueError("japan_arrival_date is required for Japan-side statuses")
-        return self
-
-
 class EngineerResponse(BaseModel):
     engineer_id: int
     ite_number: str
@@ -36,6 +29,7 @@ class EngineerResponse(BaseModel):
     category: str
     current_status: str
     total_experience_months: int
+    date_of_joining: Optional[date] = None
 
 
 class StatusUpdateRequest(BaseModel):
@@ -53,6 +47,7 @@ class StatusUpdateResponse(BaseModel):
 
 class PipelineSummaryItem(BaseModel):
     status: str
+    key: str
     count: int
     percentage: float
 

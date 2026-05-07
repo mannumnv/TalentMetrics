@@ -1,14 +1,23 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Shield, Upload, Users } from "lucide-react";
 import "./styles.css";
 
 type Page = "dashboard" | "upload" | "admin";
-type PipelineItem = { status: string; count: number; percentage: number };
+type PipelineItem = { status: string; key: string; count: number; percentage: number };
+type UploadResult = { validation_run_id: number; total_records: number; inserted_records: number; updated_records: number; unchanged_records: number; error_records: number };
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const colors = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#64748b"];
+const queryClient = new QueryClient();
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+  return response.json();
+}
 
 function App() {
   const [page, setPage] = useState<Page>("dashboard");
@@ -30,23 +39,31 @@ function App() {
 }
 
 function Dashboard() {
-  const [data, setData] = useState<PipelineItem[]>([]);
   const [drillDown, setDrillDown] = useState<string | null>(null);
+  const [month, setMonth] = useState("");
+  const [category, setCategory] = useState("all");
+  const [status, setStatus] = useState("all");
 
-  useEffect(() => {
-    fetch(`${API_URL}/api/v1/analytics/pipeline-summary`)
-      .then((res) => res.json())
-      .then(setData)
-      .catch(() => setData([]));
-  }, []);
+  const queryParams = new URLSearchParams();
+  if (month) queryParams.set("as_of_month", month);
+  if (category !== "all") queryParams.set("category", category);
+  const queryString = queryParams.toString();
+  const analyticsUrl = `${API_URL}/api/v1/analytics/pipeline-summary${queryString ? `?${queryString}` : ""}`;
 
-  const total = data.reduce((sum, item) => sum + item.count, 0);
-  const trendData = [
-    { month: "Jan", Training: 12, Bench: 18, Joined: 44 },
-    { month: "Feb", Training: 18, Bench: 21, Joined: 51 },
-    { month: "Mar", Training: 15, Bench: 19, Joined: 62 },
-    { month: "Apr", Training: data[0]?.count || 0, Bench: data[1]?.count || 0, Joined: data[3]?.count || 0 }
-  ];
+  const { data = [], isLoading, error, refetch } = useQuery({
+    queryKey: ["pipeline-summary", month, category],
+    queryFn: () => fetchJson<PipelineItem[]>(analyticsUrl),
+    refetchOnWindowFocus: true
+  });
+
+  const visibleData = status === "all" ? data : data.filter((item) => item.status === status);
+  const total = visibleData.reduce((sum, item) => sum + item.count, 0);
+  const countByKey = Object.fromEntries(visibleData.map((item) => [item.key, item.count]));
+  const trendData = [{
+    month: "Current",
+    Training: countByKey.training || 0,
+    ProjectJoined: countByKey.project_joined || 0
+  }];
 
   return (
     <section className="page">
@@ -58,33 +75,44 @@ function Dashboard() {
       </header>
 
       <div className="filters">
-        <input type="date" />
-        <select><option>All Categories</option><option>Fresher</option><option>Experienced</option></select>
-        <select><option>All Statuses</option>{data.map((item) => <option key={item.status}>{item.status}</option>)}</select>
-        <button>Apply</button>
+        <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} />
+        <select value={category} onChange={(event) => setCategory(event.target.value)}>
+          <option value="all">All Categories</option>
+          <option value="Fresher">Fresher</option>
+          <option value="Experienced">Experienced</option>
+        </select>
+        <select value={status} onChange={(event) => setStatus(event.target.value)}>
+          <option value="all">All Statuses</option>
+          {data.map((item) => <option key={item.key} value={item.status}>{item.status}</option>)}
+        </select>
+        <button onClick={() => refetch()}>Apply</button>
       </div>
+
+      {isLoading && <Panel title="Loading"><p>Loading analytics...</p></Panel>}
+      {error && <Panel title="Error"><p>Unable to load analytics from backend.</p></Panel>}
 
       <div className="kpis">
         <Card title="Total Engineers" value={total} note="Live database count" />
-        {data.map((item) => <Card key={item.status} title={item.status} value={item.count} note={`${item.percentage}% of total`} />)}
+        {visibleData.map((item) => <Card key={item.key} title={item.status} value={item.count} note={`${item.percentage}% of total`} />)}
       </div>
 
       <div className="grid two">
         <Panel title="Status Distribution">
           <ResponsiveContainer width="100%" height={280}>
             <PieChart>
-              <Pie data={data} dataKey="count" nameKey="status" outerRadius={95} label={(entry) => `${entry.status}: ${entry.count} (${entry.percentage}%)`} onClick={(entry) => setDrillDown(entry.status)}>
-                {data.map((_, index) => <Cell key={index} fill={colors[index % colors.length]} />)}
+              <Pie data={visibleData} dataKey="count" nameKey="status" outerRadius={90} labelLine={false} label={(entry) => `${entry.count} (${entry.percentage}%)`} onClick={(entry) => setDrillDown(entry.status)}>
+                {visibleData.map((_, index) => <Cell key={index} fill={colors[index % colors.length]} />)}
               </Pie>
               <Tooltip />
+              <Legend />
             </PieChart>
           </ResponsiveContainer>
         </Panel>
         <Panel title="Status Bar Chart">
           <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={data} onClick={(state) => setDrillDown(state?.activeLabel || null)}>
+            <BarChart data={visibleData} onClick={(state) => setDrillDown(state?.activeLabel || null)}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="status" />
+              <XAxis dataKey="status" tick={{ fontSize: 12 }} interval={0} />
               <YAxis />
               <Tooltip />
               <Bar dataKey="count" fill="#2563eb" />
@@ -101,19 +129,21 @@ function Dashboard() {
             <YAxis />
             <Tooltip />
             <Line type="monotone" dataKey="Training" stroke="#2563eb" />
-            <Line type="monotone" dataKey="Bench" stroke="#16a34a" />
-            <Line type="monotone" dataKey="Joined" stroke="#dc2626" />
+            <Line type="monotone" dataKey="ProjectJoined" stroke="#16a34a" />
           </LineChart>
         </ResponsiveContainer>
       </Panel>
 
-      {drillDown && <div className="drawer"><button onClick={() => setDrillDown(null)}>Close</button><h3>{drillDown} Engineers</h3><EngineerTable status={drillDown} /></div>}
+      {drillDown && <div className="drawer"><button onClick={() => setDrillDown(null)}>Close</button><h3>{drillDown} Engineers</h3><EngineerTable status={drillDown} category={category} month={month} /></div>}
     </section>
   );
 }
 
 function UploadPage() {
   const [message, setMessage] = useState("");
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadedRows, setUploadedRows] = useState<any[]>([]);
+  const queryClient = useQueryClient();
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -122,6 +152,15 @@ function UploadPage() {
     setMessage("Uploading...");
     const res = await fetch(`${API_URL}/api/v1/uploads/engineers`, { method: "POST", body: file });
     const json = await res.json();
+    if (!res.ok) {
+      setUploadResult(null);
+      setMessage(JSON.stringify(json, null, 2));
+      return;
+    }
+    setUploadResult(json);
+    await queryClient.invalidateQueries({ queryKey: ["pipeline-summary"] });
+    const rows = await fetchJson<any[]>(`${API_URL}/api/v1/engineers`);
+    setUploadedRows(rows);
     setMessage(JSON.stringify(json, null, 2));
   }
 
@@ -133,8 +172,25 @@ function UploadPage() {
           <input name="file" type="file" accept=".xlsx,.xls,.csv" required />
           <button>Validate and Import</button>
         </form>
+        {uploadResult && (
+          <div className="kpis">
+            <Card title="Total Records" value={uploadResult.total_records} note="Rows read from uploaded file" />
+            <Card title="Inserted" value={uploadResult.inserted_records} note="New engineers added" />
+            <Card title="Updated" value={uploadResult.updated_records} note="Existing engineers changed" />
+            <Card title="Unchanged" value={uploadResult.unchanged_records} note="Already up to date" />
+            <Card title="Errors" value={uploadResult.error_records} note="Rows skipped with validation errors" />
+          </div>
+        )}
         {message && <pre>{message}</pre>}
       </Panel>
+      {uploadedRows.length > 0 && (
+        <Panel title="Uploaded Data">
+          <table>
+            <thead><tr><th>ITE</th><th>Name</th><th>Category</th><th>Status</th><th>Join Date</th></tr></thead>
+            <tbody>{uploadedRows.map((row) => <tr key={row.engineer_id}><td>{row.ite_number}</td><td>{row.full_name}</td><td>{row.category}</td><td>{row.current_status}</td><td>{row.date_of_joining || "-"}</td></tr>)}</tbody>
+          </table>
+        </Panel>
+      )}
     </section>
   );
 }
@@ -157,11 +213,14 @@ function AdminPage() {
   );
 }
 
-function EngineerTable({ status }: { status: string }) {
+function EngineerTable({ status, category, month }: { status: string; category: string; month: string }) {
   const [rows, setRows] = useState<any[]>([]);
   useEffect(() => {
-    fetch(`${API_URL}/api/v1/engineers?status=${encodeURIComponent(status)}`).then((res) => res.json()).then(setRows).catch(() => setRows([]));
-  }, [status]);
+    const params = new URLSearchParams({ status });
+    if (category !== "all") params.set("category", category);
+    if (month) params.set("as_of_month", month);
+    fetch(`${API_URL}/api/v1/engineers?${params.toString()}`).then((res) => res.json()).then(setRows).catch(() => setRows([]));
+  }, [status, category, month]);
   return <table><thead><tr><th>ITE</th><th>Name</th><th>Category</th><th>Status</th></tr></thead><tbody>{rows.map((row) => <tr key={row.engineer_id}><td>{row.ite_number}</td><td>{row.full_name}</td><td>{row.category}</td><td>{row.current_status}</td></tr>)}</tbody></table>;
 }
 
@@ -173,5 +232,5 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   return <section className="panel"><h3>{title}</h3>{children}</section>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>);
 

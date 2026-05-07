@@ -131,3 +131,36 @@ Cron at 06:00:
 0 6 * * * cd /Users/manmohankumar/Documents/TalentMetrics && make batch
 ```
 >>>>>>> 269fb36 (Initial commit)
+
+## Multi-Sheet Excel Processing
+
+Process an Excel workbook where each sheet may represent a month, but only `JOIN_DATE` / `入社日` is used for analytics logic:
+
+```bash
+make process-excel FILE=/path/to/engineers.xlsx
+```
+
+FastAPI endpoint:
+
+```text
+POST /api/v1/processing/engineer-excel
+```
+
+Supported headers include English and Japanese:
+
+```text
+ITE_NO / ITE番号
+JOIN_DATE / 入社日
+CONTRACT_START / 契約開始日
+CONTRACT_END / 契約終了日
+STATUS / ステータス
+```
+
+The returned JSON contains:
+
+```text
+monthly_summary
+yearly_summary
+tenure_distribution
+invalid_records_log
+```

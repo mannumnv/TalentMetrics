@@ -7,7 +7,7 @@ VENV := $(BACKEND_DIR)/.venv
 PIP := $(VENV)/bin/pip
 UVICORN := $(VENV)/bin/uvicorn
 
-.PHONY: help setup setup-backend setup-frontend app backend backend-reload frontend batch batch-list batch-file health clean db-up db-down
+.PHONY: help setup setup-backend setup-frontend app backend backend-reload frontend batch batch-list batch-file process-excel health clean db-up db-down
 
 help:
 	@echo "TalentMetrics commands"
@@ -19,6 +19,7 @@ help:
 	@echo "  make batch          Import sample_engineers.csv"
 	@echo "  make batch-list     Import /Users/manmohankumar/Downloads/List.csv"
 	@echo "  make batch-file FILE=/path/file.csv  Import any CSV/XLSX file"
+	@echo "  make process-excel FILE=/path/file.xlsx  Process multi-sheet Excel analytics JSON"
 	@echo "  make health         Check backend health"
 	@echo "  make db-up          Start PostgreSQL with Docker, optional"
 	@echo "  make db-down        Stop PostgreSQL with Docker"
@@ -48,7 +49,7 @@ backend-reload:
 	@cd $(BACKEND_DIR) && .venv/bin/uvicorn app.main:app --reload --port 8000
 
 frontend:
-	@test -d $(FRONTEND_DIR)/node_modules || $(MAKE) setup-frontend
+	@test -d $(FRONTEND_DIR)/node_modules/@tanstack/react-query || $(MAKE) setup-frontend
 	@cd $(FRONTEND_DIR) && npm run dev
 
 batch:
@@ -63,6 +64,11 @@ batch-file:
 	@test -n "$(FILE)" || (echo "Usage: make batch-file FILE=/path/to/file.csv" && exit 1)
 	@test -d $(VENV) || $(MAKE) setup-backend
 	@cd $(BACKEND_DIR) && .venv/bin/python -m app.batch.daily_sync --file "$(FILE)"
+
+process-excel:
+	@test -n "$(FILE)" || (echo "Usage: make process-excel FILE=/path/to/file.xlsx" && exit 1)
+	@test -d $(VENV) || $(MAKE) setup-backend
+	@cd $(BACKEND_DIR) && .venv/bin/python -m app.batch.process_engineer_excel --file "$(FILE)"
 
 health:
 	@curl http://localhost:8000/health

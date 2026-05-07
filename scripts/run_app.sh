@@ -10,7 +10,7 @@ if [ ! -d "$BACKEND_DIR/.venv" ]; then
   make -C "$ROOT_DIR" setup-backend
 fi
 
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+if [ ! -d "$FRONTEND_DIR/node_modules/@tanstack/react-query" ]; then
   echo "Frontend node_modules missing. Running setup-frontend..."
   make -C "$ROOT_DIR" setup-frontend
 fi

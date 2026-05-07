@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
+import re
 from datetime import date, datetime
-from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -11,21 +12,13 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas, services
 from app.db import get_db
+from app.processing.safe_excel import ExcelIngestionError, read_tabular_upload
 
 router = APIRouter(prefix="/api/v1/uploads", tags=["uploads"])
+logger = logging.getLogger(__name__)
 
 
-STATUS_ALIASES = {
-    "training": "Training",
-    "bench": "In Japan (Bench)",
-    "in japan": "In Japan (Bench)",
-    "in japan (bench)": "In Japan (Bench)",
-    "prejoin": "Assigned (Pre-Join)",
-    "pre-join": "Assigned (Pre-Join)",
-    "assigned (pre-join)": "Assigned (Pre-Join)",
-    "joined": "Joined",
-    "historical": "Historical",
-}
+STATUS_ALIASES = services.STATUS_ALIASES
 
 
 def value(row: Dict[str, Any], name: str) -> Any:
@@ -38,6 +31,18 @@ def value(row: Dict[str, Any], name: str) -> Any:
     return item
 
 
+def as_text(value: Any) -> Optional[str]:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().replace("\u3000", " ")
+    return text or None
+
+
+def as_email(value: Any) -> Optional[str]:
+    text = as_text(value)
+    return text.lower() if text else None
+
+
 def first_value(row: Dict[str, Any], names: List[str]) -> Any:
     for name in names:
         item = value(row, name)
@@ -47,33 +52,19 @@ def first_value(row: Dict[str, Any], names: List[str]) -> Any:
 
 
 def parse_date(item: Any) -> Optional[date]:
-    if not item:
+    if item is None or pd.isna(item):
         return None
-    return pd.to_datetime(item).date()
+    parsed = pd.to_datetime(item, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
 
 
 def read_upload_dataframe(file_name: Optional[str], content: bytes) -> pd.DataFrame:
-    if file_name and file_name.lower().endswith(".csv"):
-        raw_df = pd.read_csv(BytesIO(content), header=None)
-    else:
-        raw_df = pd.read_excel(BytesIO(content), header=None)
-
-    header_index = 0
-    for index, row in raw_df.iterrows():
-        values = {str(item).strip() for item in row.tolist() if not pd.isna(item)}
-        if "ITE Number" in values or "ITE番号" in values:
-            header_index = index
-            break
-
-    columns = [str(item).strip() if not pd.isna(item) else "" for item in raw_df.iloc[header_index].tolist()]
-    df = raw_df.iloc[header_index + 1 :].copy()
-    df.columns = columns
-    df = df.dropna(how="all")
-
-    ite_column = "ITE Number" if "ITE Number" in df.columns else "ITE番号" if "ITE番号" in df.columns else None
-    if ite_column:
-        df = df[df[ite_column].notna()]
-
+    df, sheet_issues = read_tabular_upload(file_name, content)
+    for issue in sheet_issues:
+        logger.warning("upload ingestion issue sheet=%s rule=%s message=%s", issue.sheet_name, issue.rule_code, issue.message)
+    logger.info("upload parsed file=%s rows=%s columns=%s", file_name, len(df.index), list(df.columns))
     return df
 
 
@@ -85,21 +76,94 @@ def months_since(start_date: Optional[date]) -> int:
 
 
 def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    joining_date = parse_date(first_value(row, ["Date of Joining", "入社日"]))
+    joining_date = parse_date(first_value(row, ["Date of Joining", "JOIN_DATE", "JOIN DATE", "入社日", "入場日"]))
     total_experience = first_value(row, ["Total Experience Months", "経験月数"])
-    raw_status = str(first_value(row, ["Status", "ステータス"]) or "Training").strip().lower()
+    raw_status = first_value(row, ["Status", "ステータス", "状態", "状況", "STATUS"])
     return {
-        "ite_number": first_value(row, ["ITE Number", "ITE番号"]),
-        "full_name": first_value(row, ["Full Name", "名前"]),
-        "email": (first_value(row, ["Email", "メール"]) or "").lower() or None,
+        "ite_number": as_text(first_value(row, ["ITE Number", "ITE番号", "ITE_NO", "ITE NO", "ITE_NUMBER"])),
+        "full_name": as_text(first_value(row, ["Full Name", "名前", "氏名", "Name"])),
+        "email": as_email(first_value(row, ["Email", "メール"])),
         "total_experience_months": int(total_experience) if total_experience is not None else months_since(joining_date),
-        "current_status": STATUS_ALIASES.get(raw_status, first_value(row, ["Status", "ステータス"]) or "Training"),
+        "current_status": services.normalize_status_name(raw_status),
         "date_of_joining": joining_date,
         "japan_arrival_date": parse_date(first_value(row, ["Japan Arrival Date", "来日日"])),
-        "primary_skill": first_value(row, ["Primary Skill", "スキル", "オフィス"]),
-        "contract_start_date": parse_date(first_value(row, ["Contract Start Date", "契約開始日"])),
-        "contract_end_date": parse_date(first_value(row, ["Contract End Date", "契約終了日"])),
+        "primary_skill": as_text(first_value(row, ["Primary Skill", "スキル", "オフィス"])),
+        "contract_start_date": parse_date(first_value(row, ["Contract Start Date", "CONTRACT_START", "CONTRACT START", "契約開始日"])),
+        "contract_end_date": parse_date(first_value(row, ["Contract End Date", "CONTRACT_END", "CONTRACT END", "契約終了日"])),
     }
+
+
+def infer_source_month(row: Dict[str, Any]) -> Optional[str]:
+    sheet = str(row.get("__source_sheet") or "")
+    match = re.search(r"(20\d{2})年\s*(\d{1,2})月", sheet) or re.search(r"(20\d{2})[-_/](\d{1,2})", sheet)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+
+    for column in row.keys():
+        text = str(column).strip()
+        match = re.fullmatch(r"(\d{1,2})/(\d{1,2})", text)
+        if match:
+            return f"{date.today().year:04d}-{int(match.group(1)):02d}"
+    return None
+
+
+def record_monthly_presence(db: Session, rows: List[Dict[str, Any]]) -> None:
+    seen: set[tuple[str, str]] = set()
+    for raw_row in rows:
+        normalized = normalize_row(raw_row)
+        ite_number = normalized.get("ite_number")
+        source_month = infer_source_month(raw_row)
+        if not ite_number or not source_month:
+            continue
+        key = (str(ite_number), source_month)
+        if key in seen:
+            continue
+        seen.add(key)
+        existing = db.scalar(
+            select(models.EngineerMonthlyPresence)
+            .where(models.EngineerMonthlyPresence.ite_number == str(ite_number))
+            .where(models.EngineerMonthlyPresence.source_month == source_month)
+        )
+        if existing:
+            existing.was_present = True
+            existing.source_sheet = str(raw_row.get("__source_sheet") or "")
+            existing.source_row = int(raw_row.get("__source_row") or 0) or None
+        else:
+            db.add(models.EngineerMonthlyPresence(
+                ite_number=str(ite_number),
+                source_month=source_month,
+                source_sheet=str(raw_row.get("__source_sheet") or ""),
+                source_row=int(raw_row.get("__source_row") or 0) or None,
+                was_present=True,
+            ))
+    logger.info("recorded monthly presence rows=%s unique=%s", len(rows), len(seen))
+
+
+def add_validation_warning(db: Session, run_id: int, row_number: Optional[int], ite_number: Optional[str], field: str, rule_code: str, message: str, invalid_value: Any = None) -> None:
+    db.add(models.ValidationLog(
+        validation_run_id=run_id,
+        severity="WARNING",
+        entity_type="Engineer",
+        ite_number=ite_number,
+        field_name=field,
+        invalid_value=None if invalid_value is None else str(invalid_value),
+        rule_code=rule_code,
+        message=message,
+        row_number=row_number,
+    ))
+
+
+def dedupe_latest_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for position, row in enumerate(rows):
+        row["__source_position"] = position
+        normalized = normalize_row(row)
+        ite_number = normalized.get("ite_number")
+        if ite_number:
+            deduped[str(ite_number)] = row
+        else:
+            deduped[f"__invalid_{position}"] = row
+    return list(deduped.values())
 
 
 @router.post("/engineers", response_model=schemas.UploadResponse)
@@ -107,15 +171,23 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
     content = await file.read()
     try:
         df = read_upload_dataframe(file.filename, content)
+    except ExcelIngestionError as exc:
+        logger.exception("upload ingestion failed file=%s details=%s", file.filename, exc.details)
+        raise HTTPException(status_code=400, detail={"status": "error", "message": exc.message, "details": exc.details}) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to read upload: {exc}") from exc
+        logger.exception("unexpected upload ingestion failure file=%s", file.filename)
+        raise HTTPException(status_code=400, detail={"status": "error", "message": "Invalid Excel format", "details": str(exc)}) from exc
 
     run = models.ValidationRun(run_name="manual_engineer_upload", source_file_name=file.filename, triggered_by="HR_USER")
     db.add(run)
     db.flush()
 
     inserted = updated = unchanged = errors = 0
-    for index, raw_row in enumerate(df.to_dict(orient="records"), start=2):
+    all_rows = df.to_dict(orient="records")
+    record_monthly_presence(db, all_rows)
+    raw_rows = dedupe_latest_rows(all_rows)
+    logger.info("upload normalized rows=%s deduped_rows=%s", len(df.index), len(raw_rows))
+    for index, raw_row in enumerate(raw_rows, start=2):
         row = normalize_row(raw_row)
         row_hash = services.source_hash(row)
         ite_number = row["ite_number"]
@@ -129,9 +201,7 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "Full Name", "NAME_REQUIRED", "Full Name is required")
             continue
         if row["current_status"] in {"In Japan (Bench)", "Assigned (Pre-Join)", "Joined"} and not row["japan_arrival_date"]:
-            errors += 1
-            services.add_validation_error(db, run.validation_run_id, index, ite_number, "Japan Arrival Date", "JAPAN_DATE_REQUIRED", "Japan arrival date is required")
-            continue
+            add_validation_warning(db, run.validation_run_id, index, ite_number, "Japan Arrival Date", "JAPAN_DATE_MISSING", "Japan arrival date is missing; row was still imported because status analytics should not be blocked.")
         if row["contract_start_date"] and row["contract_end_date"] and row["contract_end_date"] < row["contract_start_date"]:
             errors += 1
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "Contract End Date", "CONTRACT_DATE_INVALID", "Contract end date must be after start date")
@@ -157,7 +227,7 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
                     "primary_skill": engineer.primary_skill,
                 }
                 changed = False
-                for field in ["full_name", "email", "total_experience_months", "japan_arrival_date", "primary_skill"]:
+                for field in ["full_name", "email", "total_experience_months", "date_of_joining", "japan_arrival_date", "primary_skill"]:
                     if getattr(engineer, field) != row[field]:
                         setattr(engineer, field, row[field])
                         changed = True
@@ -165,7 +235,7 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
                     engineer.category_id = category.category_id
                     changed = True
                 if engineer.current_status.status_name != row["current_status"]:
-                    services.update_engineer_status(db, engineer, row["current_status"], date.today(), "Upload sync", "UPLOAD")
+                    services.sync_engineer_status_from_import(db, engineer, row["current_status"], date.today(), "Upload sync", "UPLOAD")
                     changed = True
                 if changed:
                     engineer.updated_at = datetime.utcnow()
@@ -204,7 +274,7 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "row", "PROCESSING_ERROR", str(exc))
 
     run.total_records = len(df.index)
-    run.valid_records = len(df.index) - errors
+    run.valid_records = len(raw_rows) - errors
     run.error_records = errors
     run.completed_at = datetime.utcnow()
     run.run_status = "Failed" if errors else "Passed"

@@ -64,6 +64,20 @@ class Engineer(Base):
     current_status = relationship("StatusPipeline")
 
 
+class EngineerMonthlyPresence(Base):
+    __tablename__ = "engineer_monthly_presence"
+
+    presence_id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True)
+    ite_number: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    source_month: Mapped[str] = mapped_column(String(7), nullable=False, index=True)
+    source_sheet: Mapped[Optional[str]] = mapped_column(String(255))
+    source_row: Mapped[Optional[int]] = mapped_column(Integer)
+    was_present: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("ite_number", "source_month"),)
+
+
 class EngineerStatusHistory(Base):
     __tablename__ = "engineer_status_history"
 
