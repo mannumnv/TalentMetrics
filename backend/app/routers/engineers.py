@@ -11,13 +11,13 @@ from app.db import get_db
 router = APIRouter(prefix="/api/v1/engineers", tags=["engineers"])
 
 
-def to_response(engineer: models.Engineer, derived_status: Optional[str] = None, as_of_month: Optional[str] = None) -> schemas.EngineerResponse:
+def to_response(engineer: models.Engineer, derived_status: Optional[str] = None, as_of_month: Optional[str] = None, category_override: Optional[str] = None) -> schemas.EngineerResponse:
     return schemas.EngineerResponse(
         engineer_id=engineer.engineer_id,
         ite_number=engineer.ite_number,
         full_name=engineer.full_name,
         email=engineer.email,
-        category=services.experience_category_as_of(engineer, as_of_month),
+        category=category_override or services.experience_category_as_of(engineer, as_of_month),
         current_status=derived_status or engineer.current_status.status_name,
         total_experience_months=engineer.total_experience_months,
         date_of_joining=engineer.date_of_joining,
@@ -48,7 +48,8 @@ def list_engineers(status: Optional[str] = None, category: Optional[str] = None,
 
     if as_of_month:
         selected_ites = services.presence_ites_for_month(db, as_of_month)
-        previous_ites = services.presence_ites_for_month(db, services.previous_month_yyyy_mm(as_of_month))
+        previous_month = services.previous_month_yyyy_mm(as_of_month)
+        previous_ites = services.presence_ites_for_month(db, previous_month)
         if status == "Project Joined":
             candidate_ites = previous_ites - selected_ites
         elif status == "Training":
@@ -67,17 +68,31 @@ def list_engineers(status: Optional[str] = None, category: Optional[str] = None,
         selected_ites = services.presence_ites_for_month(db, as_of_month)
     else:
         selected_ites = set()
+        previous_month = None
     responses = []
+    selected_join_dates = services.monthly_record_join_dates(db, as_of_month) if as_of_month else {}
+    previous_join_dates = services.monthly_record_join_dates(db, previous_month) if previous_month else {}
     for engineer in engineers:
         if as_of_month:
-            derived = "Training" if engineer.ite_number in selected_ites else "Project Joined"
+            if engineer.ite_number in selected_ites:
+                derived = "Training"
+                joining_date = selected_join_dates.get(engineer.ite_number)
+            else:
+                derived = "Project Joined"
+                joining_date = previous_join_dates.get(engineer.ite_number)
+            if joining_date:
+                as_of_date = services.month_end_from_yyyy_mm(as_of_month)
+                category_label = services.experience_category_label(services.months_between(joining_date, as_of_date)) if as_of_date else services.experience_category_as_of(engineer, as_of_month)
+            else:
+                category_label = services.experience_category_as_of(engineer, as_of_month)
         else:
             derived = "Training"
-        if not services.engineer_matches_category(engineer, category, as_of_month):
+            category_label = services.experience_category_as_of(engineer, as_of_month)
+        if category and category_label != category:
             continue
         if status and status != "all" and derived != status:
             continue
-        responses.append(to_response(engineer, derived_status=derived, as_of_month=as_of_month))
+        responses.append(to_response(engineer, derived_status=derived, as_of_month=as_of_month, category_override=category_label))
     return responses
 
 

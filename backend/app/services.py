@@ -282,6 +282,32 @@ def monthly_record_ite_query(month: str) -> Any:
     )
 
 
+def monthly_record_join_dates(db: Session, month: str) -> Dict[str, Optional[date]]:
+    year, month_number = [int(part) for part in month.split("-", 1)]
+    try:
+        rows = db.execute(
+            select(models.EngineerMonthlyRecord.ite_number, models.EngineerMonthlyRecord.date_of_joining)
+            .where(models.EngineerMonthlyRecord.year == year)
+            .where(models.EngineerMonthlyRecord.month == month_number)
+        ).all()
+    except OperationalError:
+        db.rollback()
+        return {}
+    return {ite_number: date_of_joining for ite_number, date_of_joining in rows}
+
+
+def monthly_record_matches_category(joining_date: Optional[date], category: Optional[str], selected_month: str) -> bool:
+    if not category:
+        return True
+    if not joining_date:
+        return False
+    as_of_date = month_end_from_yyyy_mm(selected_month)
+    if as_of_date is None:
+        return False
+    label = experience_category_label(months_between(joining_date, as_of_date))
+    return label == category
+
+
 def apply_analytics_filters(stmt: Any, as_of_month: Optional[str] = None, category: Optional[str] = None) -> Any:
     cutoff = month_end_from_yyyy_mm(as_of_month)
     if cutoff is not None:
@@ -509,19 +535,25 @@ def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, cat
     selected_month = as_of_month or default_analysis_month(db)
     if as_of_month:
         selected_ites = presence_ites_for_month(db, selected_month)
-        previous_ites = presence_ites_for_month(db, previous_month_yyyy_mm(selected_month))
-        candidate_ites = selected_ites | previous_ites
-        engineers = db.scalars(select(models.Engineer).where(models.Engineer.ite_number.in_(candidate_ites))).unique().all()
-        filtered_ites = {
-            engineer.ite_number
-            for engineer in engineers
-            if engineer_matches_category(engineer, category, selected_month)
+        previous_month = previous_month_yyyy_mm(selected_month)
+        previous_ites = presence_ites_for_month(db, previous_month)
+        selected_join_dates = monthly_record_join_dates(db, selected_month)
+        previous_join_dates = monthly_record_join_dates(db, previous_month)
+        filtered_training_ites = {
+            ite_number
+            for ite_number in selected_ites
+            if monthly_record_matches_category(selected_join_dates.get(ite_number), category, selected_month)
+        }
+        filtered_project_joined_ites = {
+            ite_number
+            for ite_number in (previous_ites - selected_ites)
+            if monthly_record_matches_category(previous_join_dates.get(ite_number), category, selected_month)
         }
         counts = {
-            "Training": len(filtered_ites & selected_ites),
-            "Project Joined": len((filtered_ites & previous_ites) - selected_ites),
+            "Training": len(filtered_training_ites),
+            "Project Joined": len(filtered_project_joined_ites),
         }
-        percentage_total = len(filtered_ites)
+        percentage_total = counts["Training"] + counts["Project Joined"]
     else:
         stmt = select(models.Engineer.ite_number)
         category_condition = category_filter_condition(category)
