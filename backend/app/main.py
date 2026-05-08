@@ -1,9 +1,9 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine
-from app.routers import admin, analytics, engineers, processing, uploads
+from app.routers import admin, analytics, auth, engineers, processing, uploads
 from app.services import seed_reference_data
 
 app = FastAPI(title="HR Analytics API", version="0.1.0")
@@ -32,9 +32,9 @@ def health():
     return {"status": "ok"}
 
 
-app.include_router(engineers.router)
-app.include_router(uploads.router)
-app.include_router(analytics.router)
-app.include_router(processing.router)
-app.include_router(admin.router)
-
+app.include_router(auth.router)
+app.include_router(engineers.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(uploads.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(analytics.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(processing.router, dependencies=[Depends(auth.get_current_user)])
+app.include_router(admin.router, dependencies=[Depends(auth.get_current_user)])

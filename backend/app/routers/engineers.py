@@ -11,13 +11,13 @@ from app.db import get_db
 router = APIRouter(prefix="/api/v1/engineers", tags=["engineers"])
 
 
-def to_response(engineer: models.Engineer, derived_status: Optional[str] = None) -> schemas.EngineerResponse:
+def to_response(engineer: models.Engineer, derived_status: Optional[str] = None, as_of_month: Optional[str] = None) -> schemas.EngineerResponse:
     return schemas.EngineerResponse(
         engineer_id=engineer.engineer_id,
         ite_number=engineer.ite_number,
         full_name=engineer.full_name,
         email=engineer.email,
-        category=engineer.category.category_name,
+        category=services.experience_category_as_of(engineer, as_of_month),
         current_status=derived_status or engineer.current_status.status_name,
         total_experience_months=engineer.total_experience_months,
         date_of_joining=engineer.date_of_joining,
@@ -41,22 +41,43 @@ def create_engineer(payload: schemas.EngineerCreate, db: Session = Depends(get_d
 
 @router.get("", response_model=List[schemas.EngineerResponse])
 def list_engineers(status: Optional[str] = None, category: Optional[str] = None, as_of_month: Optional[str] = None, db: Session = Depends(get_db)):
-    stmt = select(models.Engineer)
-    if category:
-        stmt = stmt.join(models.EngineerCategory).where(models.EngineerCategory.category_name == category)
     try:
-        cutoff = services.month_end_from_yyyy_mm(as_of_month)
+        services.validate_not_future_month(as_of_month)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"status": "error", "message": "Invalid filter", "details": str(exc)}) from exc
-    if cutoff is not None:
-        stmt = stmt.where(models.Engineer.date_of_joining.is_not(None)).where(models.Engineer.date_of_joining <= cutoff)
+
+    if as_of_month:
+        selected_ites = services.presence_ites_for_month(db, as_of_month)
+        previous_ites = services.presence_ites_for_month(db, services.previous_month_yyyy_mm(as_of_month))
+        if status == "Project Joined":
+            candidate_ites = previous_ites - selected_ites
+        elif status == "Training":
+            candidate_ites = selected_ites
+        else:
+            candidate_ites = selected_ites | previous_ites
+        stmt = (
+            select(models.Engineer)
+            .where(models.Engineer.ite_number.in_(candidate_ites))
+        )
+    else:
+        stmt = select(models.Engineer)
+
     engineers = db.scalars(stmt).unique().all()
+    if as_of_month:
+        selected_ites = services.presence_ites_for_month(db, as_of_month)
+    else:
+        selected_ites = set()
     responses = []
     for engineer in engineers:
-        derived = services.engineer_derived_status(db, engineer.ite_number, as_of_month)
+        if as_of_month:
+            derived = "Training" if engineer.ite_number in selected_ites else "Project Joined"
+        else:
+            derived = "Training"
+        if not services.engineer_matches_category(engineer, category, as_of_month):
+            continue
         if status and status != "all" and derived != status:
             continue
-        responses.append(to_response(engineer, derived_status=derived))
+        responses.append(to_response(engineer, derived_status=derived, as_of_month=as_of_month))
     return responses
 
 
@@ -86,4 +107,3 @@ def update_status(ite_number: str, payload: schemas.StatusUpdateRequest, db: Ses
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-

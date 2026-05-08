@@ -107,6 +107,49 @@ def infer_source_month(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def source_year_month(row: Dict[str, Any]) -> Optional[tuple[int, int]]:
+    source_month = infer_source_month(row)
+    if not source_month:
+        return None
+    year_text, month_text = source_month.split("-", 1)
+    return int(year_text), int(month_text)
+
+
+def record_monthly_records(db: Session, rows: List[Dict[str, Any]]) -> None:
+    uploaded_at = datetime.utcnow()
+    seen: set[tuple[str, int, int]] = set()
+    for raw_row in rows:
+        normalized = normalize_row(raw_row)
+        ite_number = normalized.get("ite_number")
+        year_month = source_year_month(raw_row)
+        if not ite_number or not year_month:
+            continue
+        year, month = year_month
+        key = (str(ite_number), month, year)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        existing = db.scalar(
+            select(models.EngineerMonthlyRecord)
+            .where(models.EngineerMonthlyRecord.ite_number == str(ite_number))
+            .where(models.EngineerMonthlyRecord.month == month)
+            .where(models.EngineerMonthlyRecord.year == year)
+        )
+        if not existing:
+            existing = models.EngineerMonthlyRecord(ite_number=str(ite_number), month=month, year=year)
+            db.add(existing)
+
+        existing.staff_no = as_text(first_value(raw_row, ["スタッフNO", "スタッフ No", "Staff No", "STAFF_NO", "Staff Number"]))
+        existing.full_name = normalized.get("full_name")
+        existing.honorific = as_text(first_value(raw_row, ["呼称", "Title", "呼び名"]))
+        existing.date_of_joining = normalized.get("date_of_joining")
+        existing.office = as_text(first_value(raw_row, ["オフィス", "Office", "Primary Skill", "スキル"]))
+        existing.sheet_name = str(raw_row.get("__source_sheet") or "")
+        existing.upload_timestamp = uploaded_at
+    logger.info("recorded monthly records rows=%s unique=%s", len(rows), len(seen))
+
+
 def record_monthly_presence(db: Session, rows: List[Dict[str, Any]]) -> None:
     seen: set[tuple[str, str]] = set()
     for raw_row in rows:
@@ -166,6 +209,20 @@ def dedupe_latest_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(deduped.values())
 
 
+def is_valid_monthly_record_row(raw_row: Dict[str, Any], invalid_ite_numbers: set[str]) -> bool:
+    row = normalize_row(raw_row)
+    ite_number = row["ite_number"]
+    if not ite_number or ite_number in invalid_ite_numbers:
+        return False
+    if not row["full_name"]:
+        return False
+    if not source_year_month(raw_row):
+        return False
+    if row["contract_start_date"] and row["contract_end_date"] and row["contract_end_date"] < row["contract_start_date"]:
+        return False
+    return True
+
+
 @router.post("/engineers", response_model=schemas.UploadResponse)
 async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(get_db)):
     content = await file.read()
@@ -183,8 +240,8 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
     db.flush()
 
     inserted = updated = unchanged = errors = 0
+    invalid_ite_numbers: set[str] = set()
     all_rows = df.to_dict(orient="records")
-    record_monthly_presence(db, all_rows)
     raw_rows = dedupe_latest_rows(all_rows)
     logger.info("upload normalized rows=%s deduped_rows=%s", len(df.index), len(raw_rows))
     for index, raw_row in enumerate(raw_rows, start=2):
@@ -198,12 +255,14 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
             continue
         if not row["full_name"]:
             errors += 1
+            invalid_ite_numbers.add(ite_number)
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "Full Name", "NAME_REQUIRED", "Full Name is required")
             continue
         if row["current_status"] in {"In Japan (Bench)", "Assigned (Pre-Join)", "Joined"} and not row["japan_arrival_date"]:
             add_validation_warning(db, run.validation_run_id, index, ite_number, "Japan Arrival Date", "JAPAN_DATE_MISSING", "Japan arrival date is missing; row was still imported because status analytics should not be blocked.")
         if row["contract_start_date"] and row["contract_end_date"] and row["contract_end_date"] < row["contract_start_date"]:
             errors += 1
+            invalid_ite_numbers.add(ite_number)
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "Contract End Date", "CONTRACT_DATE_INVALID", "Contract end date must be after start date")
             continue
 
@@ -269,6 +328,7 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
             db.flush()
         except Exception as exc:
             errors += 1
+            invalid_ite_numbers.add(ite_number)
             db.rollback()
             db.add(run)
             services.add_validation_error(db, run.validation_run_id, index, ite_number, "row", "PROCESSING_ERROR", str(exc))
@@ -278,6 +338,10 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
     run.error_records = errors
     run.completed_at = datetime.utcnow()
     run.run_status = "Failed" if errors else "Passed"
+    valid_monthly_rows = [raw_row for raw_row in all_rows if is_valid_monthly_record_row(raw_row, invalid_ite_numbers)]
+    if valid_monthly_rows:
+        record_monthly_records(db, valid_monthly_rows)
+        record_monthly_presence(db, valid_monthly_rows)
     db.commit()
     return schemas.UploadResponse(
         validation_run_id=run.validation_run_id,
@@ -287,4 +351,3 @@ async def upload_engineers(file: UploadFile = File(...), db: Session = Depends(g
         unchanged_records=unchanged,
         error_records=errors,
     )
-

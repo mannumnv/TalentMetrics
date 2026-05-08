@@ -72,3 +72,50 @@ class AuditLogResponse(BaseModel):
     changed_at: datetime
     source_system: Optional[str]
 
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    dob: date
+    location: str = Field(min_length=1)
+    role: Literal["admin", "user"] = "user"
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=1)
+    password: str
+
+
+class UserResponse(BaseModel):
+    user_id: int
+    email: str
+    role: str
+    dob: date
+    location: str
+
+
+class AdminUserResponse(BaseModel):
+    user_id: int
+    email: str
+    role: str
+    dob: date
+    location: str
+    created_at: datetime
+
+
+class DobUpdateRequest(BaseModel):
+    dob: date
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserResponse
+
+
+class UserActivityLogResponse(BaseModel):
+    activity_log_id: int
+    user_email: Optional[str]
+    role: Optional[str]
+    login_time: Optional[datetime]
+    action_performed: str
+    timestamp: datetime

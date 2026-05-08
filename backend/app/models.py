@@ -78,6 +78,24 @@ class EngineerMonthlyPresence(Base):
     __table_args__ = (UniqueConstraint("ite_number", "source_month"),)
 
 
+class EngineerMonthlyRecord(Base):
+    __tablename__ = "engineer_monthly_records"
+
+    record_id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True)
+    staff_no: Mapped[Optional[str]] = mapped_column("スタッフNO", String(50))
+    ite_number: Mapped[str] = mapped_column("ITE番号", String(50), nullable=False, index=True)
+    full_name: Mapped[Optional[str]] = mapped_column("名前", String(200))
+    honorific: Mapped[Optional[str]] = mapped_column("呼称", String(100))
+    date_of_joining: Mapped[Optional[str]] = mapped_column("入社日", SqlDate)
+    office: Mapped[Optional[str]] = mapped_column("オフィス", String(150))
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    month: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    upload_timestamp: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now(), index=True)
+
+    __table_args__ = (UniqueConstraint("ITE番号", "month", "year"),)
+
+
 class EngineerStatusHistory(Base):
     __tablename__ = "engineer_status_history"
 
@@ -198,3 +216,42 @@ class EngineerSourceState(Base):
     ite_number: Mapped[str] = mapped_column(String(50), primary_key=True)
     last_source_hash: Mapped[str] = mapped_column(Text, nullable=False)
     last_seen_at: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now())
+
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+
+    user_id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    dob: Mapped[str] = mapped_column(SqlDate, nullable=False)
+    location: Mapped[str] = mapped_column(String(150), nullable=False)
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="user")
+    created_at: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now())
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    session_id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_users.user_id"), nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    created_at: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    user = relationship("AppUser")
+
+
+class UserActivityLog(Base):
+    __tablename__ = "user_activity_logs"
+
+    activity_log_id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("app_users.user_id"), index=True)
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    role: Mapped[Optional[str]] = mapped_column(String(30))
+    login_time: Mapped[Optional[str]] = mapped_column(SqlDateTime(timezone=True))
+    action_performed: Mapped[str] = mapped_column(String(150), nullable=False)
+    timestamp: Mapped[str] = mapped_column(SqlDateTime(timezone=True), server_default=func.now(), index=True)
+
+    user = relationship("AppUser")

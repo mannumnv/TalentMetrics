@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import case, exists, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import models
@@ -110,6 +111,66 @@ def month_start_from_yyyy_mm(month: str) -> date:
         raise ValueError("month must use YYYY-MM format") from exc
 
 
+def next_month_yyyy_mm(month: str) -> str:
+    start = month_start_from_yyyy_mm(month)
+    year = start.year + 1 if start.month == 12 else start.year
+    month_number = 1 if start.month == 12 else start.month + 1
+    return f"{year:04d}-{month_number:02d}"
+
+
+def previous_month_yyyy_mm(month: str) -> str:
+    start = month_start_from_yyyy_mm(month)
+    year = start.year - 1 if start.month == 1 else start.year
+    month_number = 12 if start.month == 1 else start.month - 1
+    return f"{year:04d}-{month_number:02d}"
+
+
+def validate_not_future_month(month: Optional[str]) -> None:
+    if not month:
+        return
+    selected = month_start_from_yyyy_mm(month)
+    today = date.today()
+    current = date(today.year, today.month, 1)
+    if selected > current:
+        raise ValueError("正しい月を入力してください。")
+
+
+def is_current_month(month: Optional[str]) -> bool:
+    if not month:
+        return False
+    selected = month_start_from_yyyy_mm(month)
+    today = date.today()
+    return selected == date(today.year, today.month, 1)
+
+
+def analysis_period_from_month(month: str) -> tuple[date, date]:
+    start = month_start_from_yyyy_mm(month)
+    today = date.today()
+    if start == date(today.year, today.month, 1):
+        end = month_end_from_yyyy_mm(month)
+    elif start.year == today.year:
+        end = month_end_from_yyyy_mm(f"{today.year:04d}-{today.month:02d}")
+    else:
+        end = date(start.year, 12, 31)
+    if end is None:
+        raise ValueError("month must use YYYY-MM format")
+    return start, end
+
+
+def engineer_status_month(engineer: models.Engineer, fallback_month: Optional[str] = None) -> str:
+    if engineer.date_of_joining:
+        return f"{engineer.date_of_joining.year:04d}-{engineer.date_of_joining.month:02d}"
+    if fallback_month:
+        return fallback_month
+    return f"{date.today().year:04d}-{date.today().month:02d}"
+
+
+def derived_presence_month(engineer: models.Engineer, selected_month: str, as_of_month: Optional[str]) -> str:
+    if is_current_month(as_of_month):
+        return selected_month
+    return next_month_yyyy_mm(engineer_status_month(engineer, selected_month))
+
+
 def default_analysis_month(db: Session) -> str:
     latest = db.scalar(select(func.max(models.EngineerMonthlyPresence.source_month)))
     if latest:
@@ -127,6 +188,98 @@ def default_last_year_start(as_of_month: str) -> date:
 
 def derived_status_label(has_presence: bool) -> str:
     return "Training" if has_presence else "Project Joined"
+
+
+def category_filter_condition(category: Optional[str]) -> Any:
+    if category == "Fresher":
+        return models.Engineer.total_experience_months < 6
+    if category == "Experienced":
+        return models.Engineer.total_experience_months > 6
+    return None
+
+
+def months_between(start_date: date, end_date: date) -> int:
+    months = (end_date.year - start_date.year) * 12 + end_date.month - start_date.month
+    if end_date.day < start_date.day:
+        months -= 1
+    return max(0, months)
+
+
+def experience_months_as_of(engineer: models.Engineer, month: str) -> int:
+    if not engineer.date_of_joining:
+        return engineer.total_experience_months
+    as_of_date = month_end_from_yyyy_mm(month)
+    if as_of_date is None:
+        return engineer.total_experience_months
+    return months_between(engineer.date_of_joining, as_of_date)
+
+
+def experience_category_as_of(engineer: models.Engineer, month: Optional[str]) -> str:
+    months = experience_months_as_of(engineer, month) if month else engineer.total_experience_months
+    return experience_category_label(months)
+
+
+def engineer_matches_category(engineer: models.Engineer, category: Optional[str], month: Optional[str]) -> bool:
+    if not category:
+        return True
+    return experience_category_as_of(engineer, month) == category
+
+
+def experience_category_label(total_experience_months: int) -> str:
+    if total_experience_months < 6:
+        return "Fresher"
+    if total_experience_months > 6:
+        return "Experienced"
+    return "Uncategorized"
+
+
+def month_has_presence(db: Session, month: str) -> bool:
+    year, month_number = [int(part) for part in month.split("-", 1)]
+    try:
+        monthly_record = db.scalar(
+            select(models.EngineerMonthlyRecord.record_id)
+            .where(models.EngineerMonthlyRecord.year == year)
+            .where(models.EngineerMonthlyRecord.month == month_number)
+            .limit(1)
+        )
+        if monthly_record is not None:
+            return True
+    except OperationalError:
+        db.rollback()
+    return db.scalar(
+        select(models.EngineerMonthlyPresence.presence_id)
+        .where(models.EngineerMonthlyPresence.source_month == month)
+        .where(models.EngineerMonthlyPresence.was_present.is_(True))
+        .limit(1)
+    ) is not None
+
+
+def presence_ites_for_month(db: Session, month: str) -> set[str]:
+    year, month_number = [int(part) for part in month.split("-", 1)]
+    try:
+        monthly_ites = set(db.scalars(
+            select(models.EngineerMonthlyRecord.ite_number)
+            .where(models.EngineerMonthlyRecord.year == year)
+            .where(models.EngineerMonthlyRecord.month == month_number)
+        ).all())
+        if monthly_ites:
+            return monthly_ites
+    except OperationalError:
+        db.rollback()
+    return set(db.scalars(
+        select(models.EngineerMonthlyPresence.ite_number)
+        .where(models.EngineerMonthlyPresence.source_month == month)
+        .where(models.EngineerMonthlyPresence.was_present.is_(True))
+    ).all())
+
+
+def monthly_record_ite_query(month: str) -> Any:
+    year, month_number = [int(part) for part in month.split("-", 1)]
+    return (
+        select(models.EngineerMonthlyRecord.ite_number)
+        .where(models.EngineerMonthlyRecord.year == year)
+        .where(models.EngineerMonthlyRecord.month == month_number)
+    )
 
 
 def apply_analytics_filters(stmt: Any, as_of_month: Optional[str] = None, category: Optional[str] = None) -> Any:
@@ -352,29 +505,31 @@ def generate_monthly_snapshot(db: Session, snapshot_month: date) -> int:
 
 
 def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    validate_not_future_month(as_of_month)
     selected_month = as_of_month or default_analysis_month(db)
-    cutoff = month_end_from_yyyy_mm(selected_month)
-    if cutoff is None:
-        raise ValueError("month must use YYYY-MM format")
-    start_date = None if as_of_month else default_last_year_start(selected_month)
-
-    stmt = select(models.Engineer).join(models.EngineerCategory)
-    stmt = stmt.where(models.Engineer.date_of_joining.is_not(None)).where(models.Engineer.date_of_joining <= cutoff)
-    if start_date is not None:
-        stmt = stmt.where(models.Engineer.date_of_joining >= start_date)
-    if category:
-        stmt = stmt.where(models.EngineerCategory.category_name == category)
-
-    engineers = db.scalars(stmt).unique().all()
-    present_ites = set(db.scalars(
-        select(models.EngineerMonthlyPresence.ite_number)
-        .where(models.EngineerMonthlyPresence.source_month == selected_month)
-        .where(models.EngineerMonthlyPresence.was_present.is_(True))
-    ).all())
-
-    counts = {"Training": 0, "Project Joined": 0}
-    for engineer in engineers:
-        counts[derived_status_label(engineer.ite_number in present_ites)] += 1
+    if as_of_month:
+        selected_ites = presence_ites_for_month(db, selected_month)
+        previous_ites = presence_ites_for_month(db, previous_month_yyyy_mm(selected_month))
+        candidate_ites = selected_ites | previous_ites
+        engineers = db.scalars(select(models.Engineer).where(models.Engineer.ite_number.in_(candidate_ites))).unique().all()
+        filtered_ites = {
+            engineer.ite_number
+            for engineer in engineers
+            if engineer_matches_category(engineer, category, selected_month)
+        }
+        counts = {
+            "Training": len(filtered_ites & selected_ites),
+            "Project Joined": len((filtered_ites & previous_ites) - selected_ites),
+        }
+        percentage_total = len(filtered_ites)
+    else:
+        stmt = select(models.Engineer.ite_number)
+        category_condition = category_filter_condition(category)
+        if category_condition is not None:
+            stmt = stmt.where(category_condition)
+        total = len(set(db.scalars(stmt).all()))
+        counts = {"Training": total, "Project Joined": 0}
+        percentage_total = total
 
     total = sum(counts.values())
     logger.info("derived_pipeline_summary month=%s category=%s total=%s counts=%s", selected_month, category, total, counts)
@@ -383,7 +538,7 @@ def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, cat
             "status": label,
             "key": DERIVED_STATUS_KEYS[label],
             "count": counts[label],
-            "percentage": round((counts[label] / total * 100), 2) if total else 0,
+            "percentage": round((counts[label] / percentage_total * 100), 2) if percentage_total else 0,
         }
         for label in DERIVED_STATUS_ORDER
     ]
@@ -403,11 +558,14 @@ def status_counts(db: Session, as_of_month: Optional[str] = None, category: Opti
 
 
 def engineer_derived_status(db: Session, ite_number: str, as_of_month: Optional[str]) -> str:
+    validate_not_future_month(as_of_month)
     selected_month = as_of_month or default_analysis_month(db)
+    engineer = db.scalar(select(models.Engineer).where(models.Engineer.ite_number == ite_number))
+    presence_month = derived_presence_month(engineer, selected_month, as_of_month) if engineer else selected_month
     exists_row = db.scalar(
         select(models.EngineerMonthlyPresence.presence_id)
         .where(models.EngineerMonthlyPresence.ite_number == ite_number)
-        .where(models.EngineerMonthlyPresence.source_month == selected_month)
+        .where(models.EngineerMonthlyPresence.source_month == presence_month)
         .where(models.EngineerMonthlyPresence.was_present.is_(True))
         .limit(1)
     )

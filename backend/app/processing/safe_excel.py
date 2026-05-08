@@ -178,6 +178,23 @@ def dedupe_by_ite_no(df: pd.DataFrame, issues: Optional[List[SheetIssue]] = None
     return cleaned
 
 
+def keep_rows_with_ite_no(df: pd.DataFrame, issues: Optional[List[SheetIssue]] = None) -> pd.DataFrame:
+    if df.empty:
+        return df.reset_index(drop=True)
+    ite_column = find_column(df, ITE_COLUMN_ALIASES)
+    if not ite_column:
+        raise ExcelIngestionError("Invalid Excel format", "Required ITE_NO / ITE番号 column is missing after sheet cleaning.")
+
+    cleaned = df.copy().reset_index(drop=True)
+    cleaned[ite_column] = cleaned[ite_column].map(lambda value: normalize_header(value) if not pd.isna(value) else None)
+    before = len(cleaned.index)
+    cleaned = cleaned[cleaned[ite_column].notna() & (cleaned[ite_column] != "")].reset_index(drop=True)
+    missing_ite = before - len(cleaned.index)
+    if missing_ite and issues is not None:
+        issues.append(SheetIssue("ALL", "ROWS_WITHOUT_ITE_DROPPED", f"Dropped {missing_ite} rows without ITE_NO."))
+    return cleaned
+
+
 def read_tabular_upload(file_name: Optional[str], content: bytes) -> Tuple[pd.DataFrame, List[SheetIssue]]:
     if file_name and file_name.lower().endswith(".csv"):
         frames, issues = read_csv_frame(content, file_name)
@@ -187,5 +204,5 @@ def read_tabular_upload(file_name: Optional[str], content: bytes) -> Tuple[pd.Da
     combined = concatenate_clean_frames(frames)
     if combined.empty:
         raise ExcelIngestionError("Invalid Excel format", "No valid data sheets found. Template sheets are ignored.")
-    deduped = dedupe_by_ite_no(combined, issues)
-    return deduped.reset_index(drop=True), issues
+    cleaned = keep_rows_with_ite_no(combined, issues)
+    return cleaned.reset_index(drop=True), issues
