@@ -52,6 +52,21 @@ class PipelineSummaryItem(BaseModel):
     percentage: float
 
 
+class TrendItem(BaseModel):
+    month: str
+    Training: int
+    ProjectJoined: int
+    Freshers: int
+    Experienced: int
+    TotalJoinees: int
+
+
+class YearComparisonItem(BaseModel):
+    month: str
+    currentYear: int
+    previousYear: int
+
+
 class UploadResponse(BaseModel):
     validation_run_id: int
     total_records: int

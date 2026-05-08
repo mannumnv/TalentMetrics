@@ -40,7 +40,7 @@ def create_engineer(payload: schemas.EngineerCreate, db: Session = Depends(get_d
 
 
 @router.get("", response_model=List[schemas.EngineerResponse])
-def list_engineers(status: Optional[str] = None, category: Optional[str] = None, as_of_month: Optional[str] = None, db: Session = Depends(get_db)):
+def list_engineers(status: Optional[str] = None, category: Optional[str] = None, as_of_month: Optional[str] = None, as_of_year: Optional[int] = None, db: Session = Depends(get_db)):
     try:
         services.validate_not_future_month(as_of_month)
     except ValueError as exc:
@@ -60,12 +60,25 @@ def list_engineers(status: Optional[str] = None, category: Optional[str] = None,
             select(models.Engineer)
             .where(models.Engineer.ite_number.in_(candidate_ites))
         )
+    elif as_of_year:
+        year_ites = set()
+        project_joined_ites = set()
+        for month_number in range(1, 13):
+            month = services.year_month_value(as_of_year, month_number)
+            current_ites = services.presence_ites_for_month(db, month)
+            previous_ites = services.presence_ites_for_month(db, services.previous_month_yyyy_mm(month))
+            year_ites.update(current_ites)
+            project_joined_ites.update(previous_ites - current_ites)
+        candidate_ites = project_joined_ites if status == "Project Joined" else year_ites
+        stmt = select(models.Engineer).where(models.Engineer.ite_number.in_(candidate_ites))
     else:
         stmt = select(models.Engineer)
 
     engineers = db.scalars(stmt).unique().all()
     if as_of_month:
         selected_ites = services.presence_ites_for_month(db, as_of_month)
+    elif as_of_year:
+        selected_ites = year_ites
     else:
         selected_ites = set()
         previous_month = None
@@ -87,7 +100,9 @@ def list_engineers(status: Optional[str] = None, category: Optional[str] = None,
                 category_label = services.experience_category_as_of(engineer, as_of_month)
         else:
             derived = "Training"
-            category_label = services.experience_category_as_of(engineer, as_of_month)
+            selected_for_category = f"{as_of_year}-12" if as_of_year else as_of_month
+            derived = "Project Joined" if as_of_year and engineer.ite_number in project_joined_ites and status == "Project Joined" else derived
+            category_label = services.experience_category_as_of(engineer, selected_for_category)
         if category and category_label != category:
             continue
         if status and status != "all" and derived != status:

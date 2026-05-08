@@ -308,6 +308,55 @@ def monthly_record_matches_category(joining_date: Optional[date], category: Opti
     return label == category
 
 
+def year_month_value(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def yearly_ite_join_dates(db: Session, year: int) -> Dict[str, Optional[date]]:
+    try:
+        rows = db.execute(
+            select(models.EngineerMonthlyRecord.ite_number, func.min(models.EngineerMonthlyRecord.date_of_joining))
+            .where(models.EngineerMonthlyRecord.year == year)
+            .group_by(models.EngineerMonthlyRecord.ite_number)
+        ).all()
+    except OperationalError:
+        db.rollback()
+        return {}
+    return {ite_number: joining_date for ite_number, joining_date in rows}
+
+
+def yearly_summary_counts(db: Session, year: int, category: Optional[str] = None) -> Dict[str, int]:
+    year_ites = set()
+    project_joined_ites = set()
+    for month_number in range(1, 13):
+        month = year_month_value(year, month_number)
+        current_ites = presence_ites_for_month(db, month)
+        previous_ites = presence_ites_for_month(db, previous_month_yyyy_mm(month))
+        year_ites.update(current_ites)
+        project_joined_ites.update(previous_ites - current_ites)
+
+    join_dates = yearly_ite_join_dates(db, year)
+    year_end = date(year, 12, 31)
+    filtered_ites = set()
+    for ite_number in year_ites:
+        label = experience_category_label(months_between(join_dates.get(ite_number), year_end)) if join_dates.get(ite_number) else None
+        if not category or label == category:
+            filtered_ites.add(ite_number)
+    filtered_project_joined = project_joined_ites & filtered_ites
+    joinees = {
+        ite_number
+        for ite_number, joining_date in join_dates.items()
+        if joining_date and joining_date.year == year and (not category or ite_number in filtered_ites)
+    }
+    return {
+        "Training": len(filtered_ites),
+        "Project Joined": len(filtered_project_joined),
+        "Total Joinees": len(joinees),
+        "Freshers": sum(1 for ite in filtered_ites if join_dates.get(ite) and months_between(join_dates[ite], year_end) < 6),
+        "Experienced": sum(1 for ite in filtered_ites if join_dates.get(ite) and months_between(join_dates[ite], year_end) > 6),
+    }
+
+
 def apply_analytics_filters(stmt: Any, as_of_month: Optional[str] = None, category: Optional[str] = None) -> Any:
     cutoff = month_end_from_yyyy_mm(as_of_month)
     if cutoff is not None:
@@ -530,8 +579,22 @@ def generate_monthly_snapshot(db: Session, snapshot_month: date) -> int:
     return inserted
 
 
-def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None) -> List[Dict[str, Any]]:
+def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None, as_of_year: Optional[int] = None) -> List[Dict[str, Any]]:
     validate_not_future_month(as_of_month)
+    if as_of_year and not as_of_month:
+        yearly_counts = yearly_summary_counts(db, as_of_year, category=category)
+        counts = {"Training": yearly_counts["Training"], "Project Joined": yearly_counts["Project Joined"]}
+        percentage_total = counts["Training"] + counts["Project Joined"]
+        return [
+            {
+                "status": label,
+                "key": DERIVED_STATUS_KEYS[label],
+                "count": counts[label],
+                "percentage": round((counts[label] / percentage_total * 100), 2) if percentage_total else 0,
+            }
+            for label in DERIVED_STATUS_ORDER
+        ]
+
     selected_month = as_of_month or default_analysis_month(db)
     if as_of_month:
         selected_ites = presence_ites_for_month(db, selected_month)
@@ -576,17 +639,64 @@ def derived_pipeline_summary(db: Session, as_of_month: Optional[str] = None, cat
     ]
 
 
-def derived_status_counts(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None) -> Dict[str, int]:
-    rows = derived_pipeline_summary(db, as_of_month=as_of_month, category=category)
+def derived_status_counts(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None, as_of_year: Optional[int] = None) -> Dict[str, int]:
+    rows = derived_pipeline_summary(db, as_of_month=as_of_month, category=category, as_of_year=as_of_year)
     return {row["key"]: int(row["count"]) for row in rows}
 
 
-def pipeline_summary(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None) -> List[Dict[str, Any]]:
-    return derived_pipeline_summary(db, as_of_month=as_of_month, category=category)
+def pipeline_summary(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None, as_of_year: Optional[int] = None) -> List[Dict[str, Any]]:
+    return derived_pipeline_summary(db, as_of_month=as_of_month, category=category, as_of_year=as_of_year)
 
 
-def status_counts(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None) -> Dict[str, int]:
-    return derived_status_counts(db, as_of_month=as_of_month, category=category)
+def status_counts(db: Session, as_of_month: Optional[str] = None, category: Optional[str] = None, as_of_year: Optional[int] = None) -> Dict[str, int]:
+    return derived_status_counts(db, as_of_month=as_of_month, category=category, as_of_year=as_of_year)
+
+
+def monthly_trend(db: Session, year: Optional[int] = None, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    if year is None:
+        latest = default_analysis_month(db)
+        year = int(latest.split("-", 1)[0])
+    rows = []
+    for month_number in range(1, 13):
+        month = year_month_value(year, month_number)
+        summary = {item["key"]: item["count"] for item in pipeline_summary(db, as_of_month=month, category=category)}
+        join_dates = monthly_record_join_dates(db, month)
+        as_of_date = month_end_from_yyyy_mm(month)
+        current_ites = presence_ites_for_month(db, month)
+        freshers = experienced = joinees = 0
+        for ite_number in current_ites:
+            joining_date = join_dates.get(ite_number)
+            if not joining_date or not as_of_date:
+                continue
+            if joining_date.year == year and joining_date.month == month_number:
+                joinees += 1
+            label = experience_category_label(months_between(joining_date, as_of_date))
+            if label == "Fresher":
+                freshers += 1
+            elif label == "Experienced":
+                experienced += 1
+        rows.append({
+            "month": f"{month_number:02d}",
+            "Training": summary.get("training", 0),
+            "ProjectJoined": summary.get("project_joined", 0),
+            "Freshers": freshers,
+            "Experienced": experienced,
+            "TotalJoinees": joinees,
+        })
+    return rows
+
+
+def year_comparison(db: Session, year: int, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    current = monthly_trend(db, year=year, category=category)
+    previous = monthly_trend(db, year=year - 1, category=category)
+    return [
+        {
+            "month": current[index]["month"],
+            "currentYear": current[index]["Training"],
+            "previousYear": previous[index]["Training"],
+        }
+        for index in range(12)
+    ]
 
 
 def engineer_derived_status(db: Session, ite_number: str, as_of_month: Optional[str]) -> str:

@@ -8,6 +8,8 @@ import "./styles.css";
 type Page = "dashboard" | "upload" | "admin";
 type PipelineItem = { status: string; key: string; count: number; percentage: number };
 type EngineerItem = { engineer_id: number; category: string };
+type TrendItem = { month: string; Training: number; ProjectJoined: number; Freshers: number; Experienced: number; TotalJoinees: number };
+type YearComparisonItem = { month: string; currentYear: number; previousYear: number };
 type UploadResult = { validation_run_id: number; total_records: number; inserted_records: number; updated_records: number; unchanged_records: number; error_records: number };
 type AuthUser = { user_id: number; email: string; role: string; dob: string; location: string };
 type AdminUser = AuthUser & { created_at: string };
@@ -15,6 +17,7 @@ type AuthResponse = { token: string; user: AuthUser };
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const colors = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#64748b"];
+const years = ["2023", "2024", "2025", "2026"];
 const queryClient = new QueryClient();
 
 function authHeaders(token: string) {
@@ -147,33 +150,52 @@ function AuthPage({ onAuth }: { onAuth: (auth: AuthResponse) => void }) {
 function Dashboard({ token }: { token: string }) {
   const [drillDown, setDrillDown] = useState<string | null>(null);
   const [month, setMonth] = useState("");
+  const [year, setYear] = useState("");
   const [category, setCategory] = useState("all");
   const [status, setStatus] = useState("all");
   const [appliedMonth, setAppliedMonth] = useState("");
+  const [appliedYear, setAppliedYear] = useState("");
   const [appliedCategory, setAppliedCategory] = useState("all");
   const [appliedStatus, setAppliedStatus] = useState("all");
   const [filterError, setFilterError] = useState("");
 
   const queryParams = new URLSearchParams();
   if (appliedMonth) queryParams.set("as_of_month", appliedMonth);
+  else if (appliedYear) queryParams.set("as_of_year", appliedYear);
   if (appliedCategory !== "all") queryParams.set("category", appliedCategory);
   const queryString = queryParams.toString();
   const analyticsUrl = `${API_URL}/api/v1/analytics/pipeline-summary${queryString ? `?${queryString}` : ""}`;
   const engineerParams = new URLSearchParams();
   if (appliedMonth) engineerParams.set("as_of_month", appliedMonth);
+  else if (appliedYear) engineerParams.set("as_of_year", appliedYear);
   if (appliedCategory !== "all") engineerParams.set("category", appliedCategory);
   if (appliedStatus !== "all") engineerParams.set("status", appliedStatus);
   const engineerQueryString = engineerParams.toString();
   const engineersUrl = `${API_URL}/api/v1/engineers${engineerQueryString ? `?${engineerQueryString}` : ""}`;
+  const trendYear = appliedYear || (appliedMonth ? appliedMonth.slice(0, 4) : String(new Date().getFullYear()));
+  const trendParams = new URLSearchParams({ year: trendYear });
+  if (appliedCategory !== "all") trendParams.set("category", appliedCategory);
+  const trendUrl = `${API_URL}/api/v1/analytics/monthly-trend?${trendParams.toString()}`;
+  const comparisonUrl = `${API_URL}/api/v1/analytics/year-comparison?${trendParams.toString()}`;
 
   const { data = [], isLoading, error, refetch } = useQuery({
-    queryKey: ["pipeline-summary", appliedMonth, appliedCategory],
+    queryKey: ["pipeline-summary", appliedMonth, appliedYear, appliedCategory],
     queryFn: () => fetchJson<PipelineItem[]>(analyticsUrl, token),
     refetchOnWindowFocus: true
   });
   const { data: filteredEngineers = [], refetch: refetchEngineers } = useQuery({
-    queryKey: ["engineers-summary", appliedMonth, appliedCategory, appliedStatus],
+    queryKey: ["engineers-summary", appliedMonth, appliedYear, appliedCategory, appliedStatus],
     queryFn: () => fetchJson<EngineerItem[]>(engineersUrl, token),
+    refetchOnWindowFocus: true
+  });
+  const { data: trendData = [] } = useQuery({
+    queryKey: ["monthly-trend", trendYear, appliedCategory],
+    queryFn: () => fetchJson<TrendItem[]>(trendUrl, token),
+    refetchOnWindowFocus: true
+  });
+  const { data: comparisonData = [] } = useQuery({
+    queryKey: ["year-comparison", trendYear, appliedCategory],
+    queryFn: () => fetchJson<YearComparisonItem[]>(comparisonUrl, token),
     refetchOnWindowFocus: true
   });
 
@@ -187,12 +209,7 @@ function Dashboard({ token }: { token: string }) {
   const categoryData = ["Fresher", "Experienced"]
     .map((label) => ({ label, count: categoryCounts[label] || 0 }))
     .filter((item) => appliedCategory === "all" || item.label === appliedCategory);
-  const trendData = [{
-    month: "Current",
-    Training: countByKey.training || 0,
-    ProjectJoined: countByKey.project_joined || 0
-  }];
-
+  const yearlyJoinees = trendData.reduce((sum, item) => sum + item.TotalJoinees, 0);
   return (
     <section className="page">
       <header className="page-header">
@@ -204,6 +221,10 @@ function Dashboard({ token }: { token: string }) {
 
       <div className="filters">
         <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} />
+        <select value={year} onChange={(event) => setYear(event.target.value)}>
+          <option value="">All Years</option>
+          {years.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
         <select value={category} onChange={(event) => setCategory(event.target.value)}>
           <option value="all">All Categories</option>
           <option value="Fresher">Fresher</option>
@@ -220,10 +241,11 @@ function Dashboard({ token }: { token: string }) {
           }
           setFilterError("");
           setAppliedMonth(month);
+          setAppliedYear(year);
           setAppliedCategory(category);
           setAppliedStatus(status);
           setDrillDown(null);
-          if (month === appliedMonth && category === appliedCategory && status === appliedStatus) {
+          if (month === appliedMonth && year === appliedYear && category === appliedCategory && status === appliedStatus) {
             refetch();
             refetchEngineers();
           }
@@ -235,6 +257,7 @@ function Dashboard({ token }: { token: string }) {
 
       <div className="kpis">
         <Card title="Total Engineers" value={total} note="Live database count" />
+        {appliedYear && !appliedMonth && <Card title="Total Joinees" value={yearlyJoinees} note={`${appliedYear} joiners`} />}
         {categoryData.map((item) => <Card key={item.label} title={item.label} value={item.count} note="Category total" />)}
         {visibleData.map((item) => <Card key={item.key} title={item.status} value={item.count} note={`${item.percentage}% of total`} />)}
       </div>
@@ -273,11 +296,27 @@ function Dashboard({ token }: { token: string }) {
             <Tooltip />
             <Line type="monotone" dataKey="Training" stroke="#2563eb" />
             <Line type="monotone" dataKey="ProjectJoined" stroke="#16a34a" />
+            <Line type="monotone" dataKey="Freshers" stroke="#f59e0b" />
+            <Line type="monotone" dataKey="Experienced" stroke="#64748b" />
           </LineChart>
         </ResponsiveContainer>
       </Panel>
 
-      {drillDown && <div className="drawer"><button onClick={() => setDrillDown(null)}>Close</button><h3>{drillDown} Engineers</h3><EngineerTable status={drillDown} category={appliedCategory} month={appliedMonth} token={token} /></div>}
+      <Panel title="Year Comparison">
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={comparisonData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="month" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" name={trendYear} dataKey="currentYear" stroke="#2563eb" />
+            <Line type="monotone" name={String(Number(trendYear) - 1)} dataKey="previousYear" stroke="#dc2626" />
+          </LineChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      {drillDown && <div className="drawer"><button onClick={() => setDrillDown(null)}>Close</button><h3>{drillDown} Engineers</h3><EngineerTable status={drillDown} category={appliedCategory} month={appliedMonth} year={appliedYear} token={token} /></div>}
     </section>
   );
 }
@@ -417,14 +456,15 @@ function AdminPage({ token, currentUser }: { token: string; currentUser: AuthUse
   );
 }
 
-function EngineerTable({ status, category, month, token }: { status: string; category: string; month: string; token: string }) {
+function EngineerTable({ status, category, month, year, token }: { status: string; category: string; month: string; year: string; token: string }) {
   const [rows, setRows] = useState<any[]>([]);
   useEffect(() => {
     const params = new URLSearchParams({ status });
     if (category !== "all") params.set("category", category);
     if (month) params.set("as_of_month", month);
+    else if (year) params.set("as_of_year", year);
     fetchJson<any[]>(`${API_URL}/api/v1/engineers?${params.toString()}`, token).then(setRows).catch(() => setRows([]));
-  }, [status, category, month, token]);
+  }, [status, category, month, year, token]);
   return <table><thead><tr><th>ITE</th><th>Name</th><th>Category</th><th>Status</th></tr></thead><tbody>{rows.map((row) => <tr key={row.engineer_id}><td>{row.ite_number}</td><td>{row.full_name}</td><td>{row.category}</td><td>{row.current_status}</td></tr>)}</tbody></table>;
 }
 
